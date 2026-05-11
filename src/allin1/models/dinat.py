@@ -7,9 +7,100 @@ import math
 import torch
 from abc import ABC,  abstractmethod
 from typing import Optional, Tuple, Callable
-from natten.functional import natten1dav, natten1dqkrpb, natten2dav, natten2dqkrpb
 from ..config import Config
 from .utils import *
+
+
+# ---------------------------------------------------------------------------
+# Pure-PyTorch implementations of the deprecated natten functional ops.
+#
+# natten >= 0.20 dropped both the unfused `natten*d{qk,qkrpb,av}` ops and
+# support for relative positional biases. natten >= 0.21 is required for
+# Blackwell (RTX 5090, sm_120). The pretrained allin1 checkpoints contain
+# learned `rpb` parameters, so we reconstruct the old semantics here using
+# native torch ops. Layouts match the original natten <= 0.16 conventions.
+# ---------------------------------------------------------------------------
+
+
+def _na_window_indices_1d(length: int, kernel_size: int, dilation: int, device):
+  """Per-query global key indices and rpb lookup indices for 1D dilated NA."""
+  K = kernel_size
+  D = dilation
+
+  i = torch.arange(length, device=device)
+  group = i % D
+  g_i = i // D
+
+  per_group_len = (length + D - 1 - torch.arange(D, device=device)) // D
+  group_len = per_group_len[group]
+
+  upper = (group_len - K).clamp_min(0)
+  start_local = (g_i - K // 2).clamp_min(0).minimum(upper)
+
+  offsets = torch.arange(K, device=device)
+  key_local = start_local.unsqueeze(1) + offsets.unsqueeze(0)
+  key_global = group.unsqueeze(1) + key_local * D
+  rpb_indices = key_local - g_i.unsqueeze(1) + (K - 1)
+  return key_global, rpb_indices
+
+
+def _na1d_qkrpb(query, key, rpb, kernel_size, dilation):
+  # query, key: (B, H, T, d). rpb: (H, 2K-1). out: (B, H, T, K).
+  T = query.shape[2]
+  key_idx, rpb_idx = _na_window_indices_1d(T, kernel_size, dilation, query.device)
+  k_window = key[:, :, key_idx, :]
+  scores = torch.einsum('bhtd,bhtkd->bhtk', query, k_window)
+  scores = scores + rpb[:, rpb_idx].unsqueeze(0)
+  return scores
+
+
+def _na1d_av(probs, value, kernel_size, dilation):
+  # probs: (B, H, T, K). value: (B, H, T, d). out: (B, H, T, d).
+  T = value.shape[2]
+  key_idx, _ = _na_window_indices_1d(T, kernel_size, dilation, value.device)
+  v_window = value[:, :, key_idx, :]
+  return torch.einsum('bhtk,bhtkd->bhtd', probs, v_window)
+
+
+def _na2d_qkrpb(query, key, rpb, kernel_size, dilation):
+  # query, key: (B, H, Y, X, d). rpb: (H, 2K-1, 2K-1). out: (B, H, Y, X, K*K).
+  # Matches natten2dqkrpb: window is flattened so softmax(dim=-1) normalizes
+  # the joint distribution over the full K x K neighborhood.
+  Y = query.shape[2]
+  X = query.shape[3]
+  y_idx, y_rpb = _na_window_indices_1d(Y, kernel_size, dilation, query.device)
+  x_idx, x_rpb = _na_window_indices_1d(X, kernel_size, dilation, query.device)
+  K = kernel_size
+
+  y_idx = y_idx.view(Y, 1, K, 1).expand(Y, X, K, K)
+  x_idx = x_idx.view(1, X, 1, K).expand(Y, X, K, K)
+  y_rpb = y_rpb.view(Y, 1, K, 1).expand(Y, X, K, K)
+  x_rpb = x_rpb.view(1, X, 1, K).expand(Y, X, K, K)
+
+  k_window = key[:, :, y_idx, x_idx, :]
+  scores = torch.einsum('bhyxd,bhyxpqd->bhyxpq', query, k_window)
+  scores = scores + rpb[:, y_rpb, x_rpb].unsqueeze(0)
+  return scores.flatten(-2)
+
+
+def _na2d_av(probs, value, kernel_size, dilation):
+  # probs: (B, H, Y, X, K*K). value: (B, H, Y, X, d). out: (B, H, Y, X, d).
+  Y = value.shape[2]
+  X = value.shape[3]
+  y_idx, _ = _na_window_indices_1d(Y, kernel_size, dilation, value.device)
+  x_idx, _ = _na_window_indices_1d(X, kernel_size, dilation, value.device)
+  K = kernel_size
+  y_idx = y_idx.view(Y, 1, K, 1).expand(Y, X, K, K)
+  x_idx = x_idx.view(1, X, 1, K).expand(Y, X, K, K)
+  v_window = value[:, :, y_idx, x_idx, :]
+  probs = probs.view(*probs.shape[:-1], K, K)
+  return torch.einsum('bhyxpq,bhyxpqd->bhyxd', probs, v_window)
+
+
+natten1dqkrpb = _na1d_qkrpb
+natten1dav = _na1d_av
+natten2dqkrpb = _na2d_qkrpb
+natten2dav = _na2d_av
 
 
 # Copied from transformers.models.beit.modeling_beit.drop_path

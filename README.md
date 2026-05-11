@@ -35,26 +35,24 @@ This package provides models for music structure analysis, predicting:
 ### 1. Install PyTorch
 
 Visit [PyTorch](https://pytorch.org/) and install the appropriate version for your system.
+Any GPU supported by PyTorch will work, including Blackwell (RTX 50 series, sm_120) with
+PyTorch built against CUDA 12.8 or newer.
 
-### 2. Install NATTEN (Required for Linux and Windows; macOS will auto-install)
-* **Linux**: Download from [NATTEN website](https://www.shi-labs.com/natten/)
-* **macOS**: Auto-installs with `allin1`.
-* **Windows**: Build from source:
-```shell
-pip install ninja # Recommended, not required
-git clone https://github.com/SHI-Labs/NATTEN
-cd NATTEN
-make
-```
-
-### 3. Install the package
+### 2. Install the package
 
 ```shell
 pip install git+https://github.com/CPJKU/madmom  # install the latest madmom directly from GitHub
 pip install allin1  # install this package
 ```
 
-### 4. (Optional) Install FFmpeg for MP3 support
+> Earlier releases required [NATTEN](https://github.com/SHI-Labs/NATTEN) for the
+> dilated neighborhood attention layers. Modern NATTEN (≥ 0.20) dropped the
+> unfused `natten*d{qk,qkrpb,av}` ops and relative-position-bias support, so
+> `allin1` now ships a small pure-PyTorch fallback that matches the deprecated
+> natten ops bit-for-bit (within fp16 tolerance) and works on every PyTorch
+> backend, including RTX 50-series GPUs.
+
+### 3. (Optional) Install FFmpeg for MP3 support
 
 For ubuntu:
 
